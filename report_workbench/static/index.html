@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>纸页 · 报告工作台</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="/" aria-label="纸页报告工作台"><span class="mark">▤</span><div>纸页<small>REPORT WORKBENCH</small></div></a>
+  <button id="new-report" class="button secondary wide">＋ 新建报告</button>
+  <div class="history-label">最近报告 <button id="refresh" title="刷新历史" aria-label="刷新历史">↻</button></div>
+  <div id="history" class="history"></div>
+  <div class="workspace"><span>当前浏览器工作区</span><code id="workspace-id"></code><button id="switch-workspace">创建新工作区</button><small>历史保存在本机。新工作区拥有独立的报告列表。</small></div>
+</aside>
+<main>
+  <header><div><span class="eyebrow">从资料到可核验的报告</span><h1>让每个结论，都有来处。</h1><p>整理学习笔记、开源项目数据或个人记录。先统计事实，再选择是否让模型辅助解读。</p></div><span class="local-badge">● 本机工作台</span></header>
+  <div id="notice" role="alert" hidden></div>
+  <section id="editor" class="card editor">
+    <div class="section-title"><h2><span>01</span> 准备资料</h2><span class="hint">UTF-8 · 单个 1 MiB · 合计 4 MiB · 最多 8 份</span></div>
+    <div class="title-row"><label>报告标题<input id="title" maxlength="120" value="本周学习投入分析" placeholder="为这份报告起个名字"></label><label>生成方式<select id="mode"><option value="rules">规则模式 · 无需 API Key</option><option value="agent" disabled>报告 Agent · 尚未配置模型</option><option value="model" disabled>直接模型解读 · 尚未配置</option></select></label></div>
+    <div class="input-grid">
+      <div class="upload-zone"><span class="file-icon">↥</span><strong>添加你的资料</strong><p>支持 CSV、Markdown 和 TXT</p><label class="button secondary">选择文件<input id="files" type="file" accept=".csv,.md,.txt" multiple hidden></label><small>或使用下面的合成样例开始</small><div class="sample-row"><button id="sample-csv">学习记录 CSV</button><button id="sample-notes">项目笔记 MD</button></div></div>
+      <div class="paste-zone"><div class="paste-heading"><label for="paste">也可以直接粘贴</label><select id="paste-kind" aria-label="粘贴内容类型"><option value="md">Markdown</option><option value="txt">TXT</option><option value="csv">CSV</option></select></div><textarea id="paste" placeholder="粘贴一段笔记，或带表头的 CSV 数据…"></textarea><div class="paste-bottom"><input id="paste-name" maxlength="120" aria-label="资料名称" placeholder="资料名称（可选）"><button id="add-paste" class="button secondary">添加资料</button></div></div>
+    </div>
+    <div id="sources" class="sources"></div>
+    <label class="instruction">分析目标<textarea id="instruction" maxlength="2000" rows="2">概括学习投入与记录中的主要发现，并指出需要补充核验的信息。</textarea></label>
+    <div class="run-row"><p id="mode-note">规则模式生成真实统计和原文摘录，不推断全文含义。</p><button id="generate" class="button primary">生成报告 <span>→</span></button></div>
+  </section>
+  <section class="card result">
+    <div class="section-title"><h2><span>02</span> 报告与证据</h2><div class="exports"><button id="export-md" disabled>↓ Markdown</button><button id="export-html" disabled>↓ HTML</button><button id="print" disabled>打印预览</button></div></div>
+    <div id="progress-panel" hidden><div class="progress-label"><span id="stage">等待生成</span><button id="cancel" class="danger">取消任务</button></div><progress id="progress" max="100" value="0"></progress></div>
+    <details id="agent-trace" hidden open><summary>Agent 执行步骤 <small>仅动作与结果摘要，不保存隐藏思维</small></summary><ol id="trace-list"></ol></details>
+    <div id="result-empty"><span>▧</span><h3>你的第一份报告，从一份资料开始</h3><p>完成后，你会看到输入来源、统计证据、生成方式与完整报告。</p></div>
+    <div id="result-meta" hidden></div>
+    <iframe id="preview" title="报告预览" sandbox="" hidden></iframe>
+    <div id="failure" role="status" hidden></div>
+  </section>
+  <footer>独立实现的个人报告工具 · 规则模式完全本地处理 · 模型模式只发送统计与有限摘录</footer>
+</main>
+</body>
+</html>
