@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hashlib
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from typing import Literal
+from time import perf_counter
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, model_validator
 
@@ -95,9 +97,7 @@ def compare(items: list[dict], args: CompareArgs) -> dict:
             "values": values, "limitation": "按传入顺序相对第一份资料计算差值；未验证两份资料的单位、时间范围或样本可比性。"}
 
 
-async def execute_tool(name: str, raw_arguments: str, items: list[dict]) -> tuple[dict, str]:
-    # Yield both sides of each operation so cancellation propagates between tools.
-    await asyncio.sleep(0)
+def parse_arguments(name: str, raw_arguments: str):
     if name not in ARGUMENT_MODELS:
         raise ValueError("拒绝未注册的工具；仅允许 list_sources、inspect_source、compare_metrics")
     if not isinstance(raw_arguments, str) or len(raw_arguments) > 4096:
@@ -107,6 +107,13 @@ async def execute_tool(name: str, raw_arguments: str, items: list[dict]) -> tupl
         args = ARGUMENT_MODELS[name].model_validate(parsed)
     except (ValueError, TypeError, ValidationError) as exc:
         raise ValueError(f"{name} 参数无效：仅接受工具声明中的字段与类型") from exc
+    return args
+
+
+async def execute_tool(name: str, raw_arguments: str, items: list[dict]) -> tuple[dict, str]:
+    # Yield both sides of each operation so cancellation propagates between tools.
+    await asyncio.sleep(0)
+    args = parse_arguments(name, raw_arguments)
     if name == 'list_sources':
         result = {"sources": inventory(items)}
         summary = f"列出 {len(items)} 份资料"
@@ -130,13 +137,25 @@ async def run_agent(instruction: str, items: list[dict], emit: TraceSink) -> str
         {"role": "user", "content": f"分析目标：{instruction}\n资料目录：{json.dumps(inventory(items), ensure_ascii=False)}"},
     ]
     seen_call_ids: set[str] = set()
+    completed_fingerprints: set[str] = set()
+    evidence_fingerprint = hashlib.sha256(json.dumps(items, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     inspected = False
     for round_number in range(1, MAX_ROUNDS + 1):
         await asyncio.sleep(0)
         if len(json.dumps(messages, ensure_ascii=False)) > MAX_CONTEXT_CHARS:
             raise ValueError("Agent 上下文超过 120000 字符上限，未生成报告")
         await emit({"round": round_number, "kind": "model", "status": "running", "summary": f"第 {round_number}/{MAX_ROUNDS} 轮：等待模型选择工具或完成报告"})
-        message = await engine.request_message(messages, tools=TOOL_SCHEMAS)
+        started = perf_counter()
+        try:
+            message = await engine.request_message(messages, tools=TOOL_SCHEMAS)
+        except (ValueError, asyncio.CancelledError) as exc:
+            await emit({'round': round_number, 'kind': 'model', 'status': 'cancelled' if isinstance(exc, asyncio.CancelledError) else 'failed',
+                        'duration_ms': round((perf_counter()-started)*1000, 2), 'usage': None,
+                        'failure_type': 'cancelled' if isinstance(exc, asyncio.CancelledError) else 'model_gateway', 'summary': '模型调用取消或失败，未获得有效结果'})
+            raise
+        await emit({'round': round_number, 'kind': 'model', 'status': 'completed',
+                    'duration_ms': round((perf_counter()-started)*1000, 2), 'usage': message.get('_usage'),
+                    'summary': '模型已响应，开始校验动作；token 仅使用服务商返回的 usage'})
         calls = message.get('tool_calls')
         if calls:
             if not isinstance(calls, list) or len(calls) > MAX_CALLS_PER_ROUND:
@@ -159,14 +178,29 @@ async def run_agent(instruction: str, items: list[dict], emit: TraceSink) -> str
             for call in clean_calls:
                 name = call['function']['name']
                 await emit({"round": round_number, "kind": "tool", "tool": name, "status": "running", "summary": f"执行 {name}"})
+                started = perf_counter()
                 try:
+                    args = parse_arguments(name, call['function']['arguments']).model_dump()
+                    fingerprint = hashlib.sha256((name + json.dumps(args, sort_keys=True, ensure_ascii=False) + evidence_fingerprint).encode()).hexdigest()
+                    if fingerprint in completed_fingerprints:
+                        await emit({'round': round_number, 'kind': 'loop_guard', 'tool': name, 'status': 'failed',
+                                    'arguments': args, 'evidence_fingerprint': evidence_fingerprint,
+                                    'failure_type': 'no_progress', 'duration_ms': round((perf_counter()-started)*1000, 2),
+                                    'summary': '工具、规范化参数和证据均未变化；阻止重复执行，终止无进展循环'})
+                        raise ValueError('Agent 重复请求相同证据和参数，检测到无进展循环，未生成报告')
                     result, summary = await execute_tool(name, call['function']['arguments'], items)
                 except ValueError:
-                    await emit({"round": round_number, "kind": "tool", "tool": name, "status": "failed", "summary": "工具名称、参数或结果校验失败"})
+                    await emit({"round": round_number, "kind": "tool", "tool": name, "status": "failed", 'failure_type': 'tool_validation', 'duration_ms': round((perf_counter()-started)*1000, 2), "summary": "工具名称、参数、循环或结果校验失败"})
                     raise
+                except asyncio.CancelledError:
+                    await emit({'round': round_number, 'kind': 'tool', 'tool': name, 'status': 'cancelled',
+                                'failure_type': 'cancelled', 'duration_ms': round((perf_counter()-started)*1000, 2), 'summary': '工具等待已取消'})
+                    raise
+                completed_fingerprints.add(fingerprint)
                 inspected = inspected or name in {'inspect_source', 'compare_metrics'}
                 messages.append({"role": "tool", "tool_call_id": call['id'], "content": json.dumps(result, ensure_ascii=False)})
-                await emit({"round": round_number, "kind": "tool", "tool": name, "status": "completed", "summary": summary})
+                await emit({"round": round_number, "kind": "tool", "tool": name, "status": "completed", "summary": summary,
+                            'arguments': args, 'duration_ms': round((perf_counter()-started)*1000, 2), 'evidence_fingerprint': evidence_fingerprint})
         else:
             content = message.get('content')
             if not inspected:

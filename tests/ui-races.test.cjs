@@ -14,7 +14,8 @@ const report = (id, title = `Report ${id}`, status = 'completed') => ({
 });
 
 async function harness() {
-  const elements = new Map(), pending = [], requests = [], downloads = [], prints = [], streams = [];
+  const elements = new Map(), pending = [], requests = [], downloads = [], prints = [], streams = [], timers = [];
+  const checkedTemplates = ['study', 'comparison', 'overview'];
   let automaticHistory = true, uuid = 0;
   function element() {
     return { hidden: false, textContent: '', disabled: false, src: '', value: '', dataset: {}, children: [],
@@ -27,11 +28,15 @@ async function harness() {
   function el(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }
   const response = body => ({ ok: true, json: async () => body, blob: async () => body });
   const context = {
-    TextEncoder, Date, setTimeout: callback => callback(),
+    TextEncoder, Date, setTimeout: (callback, delay) => delay === 700 ? timers.push(callback) : callback(),
     URL: { createObjectURL: () => 'blob:test-report', revokeObjectURL() {} },
     crypto: { randomUUID: () => `workspace-${++uuid}` },
     localStorage: { getItem: () => null, setItem() {} },
-    document: { getElementById: el, createElement: element },
+    document: { getElementById: el, createElement: element,
+      querySelectorAll: selector => {
+        assert.equal(selector, 'input[name="batch-template"]:checked');
+        return checkedTemplates.map(value => ({ value }));
+      } },
     window: { open: (...args) => prints.push(args) },
     EventSource: class {
       constructor(url) { this.url = url; this.listeners = {}; streams.push(this); }
@@ -41,6 +46,7 @@ async function harness() {
     fetch: (url, options = {}) => {
       requests.push({ url, options });
       if (url === '/api/config') return Promise.resolve(response({ model_available: false }));
+      if (url === '/api/batches' && !options.method) return Promise.resolve(response([]));
       if (url === '/api/jobs' && !options.method && automaticHistory) return Promise.resolve(response([]));
       return new Promise((resolve, reject) => pending.push({ url, options, resolve, reject }));
     },
@@ -53,7 +59,7 @@ async function harness() {
     assert.notEqual(index, -1, `Expected an outstanding request for ${url}`);
     return pending.splice(index, 1)[0];
   }
-  return { el, requests, downloads, prints, streams, pending,
+  return { el, requests, downloads, prints, streams, pending, timers, checkedTemplates,
     run: code => vm.runInContext(code, context),
     historyManual: () => { automaticHistory = false; },
     take,
@@ -170,4 +176,71 @@ test('late job creation after switching workspace does not select the old job', 
   assert.equal(h.run('activeId'), null);
   assert.equal(h.requests.some(item => item.url === '/api/jobs/A'), false);
   assert.equal(h.el('export-md').disabled, true);
+});
+
+const batch = (id, terminal = true) => ({ id, title: `Batch ${id}`, terminal,
+  completed: terminal ? 1 : 0, jobs: [report(`${id}-job`, `Report ${id}`, terminal ? 'completed' : 'queued')] });
+
+test('batch submission preserves selected templates and original source evidence', async () => {
+  const h = await harness();
+  h.run("addSource({name:'data.csv',kind:'csv',content:'minutes\\n15\\n25'})");
+  h.el('title').value = 'Batch example'; h.el('mode').value = 'rules'; h.el('instruction').value = '核验投入';
+  h.checkedTemplates.splice(1, 1);
+  const creating = h.el('generate-batch').onclick();
+  const request = h.take('/api/batches'), body = JSON.parse(request.options.body);
+  assert.deepEqual(body.templates, ['study', 'overview']);
+  assert.equal(body.sources[0].content, 'minutes\n15\n25');
+  assert.equal(body.instruction, '核验投入');
+  request.resolve(h.response({ id: 'B' })); await settle();
+  h.respond('/api/batches/B', batch('B')); await creating;
+  assert.equal(h.el('batch-title').textContent, 'Batch B');
+  assert.equal(h.el('export-batch').disabled, false);
+});
+
+test('late batch creation cannot replace a newer batch selection', async () => {
+  const h = await harness();
+  h.run("addSource({name:'note.txt',kind:'txt',content:'example'})");
+  h.el('title').value = 'Example'; h.el('mode').value = 'rules';
+  const creating = h.el('generate-batch').onclick();
+  const selecting = h.run("selectBatch('B')"); h.respond('/api/batches/B', batch('B')); await selecting;
+  h.respond('/api/batches', { id: 'A' }); await creating;
+  assert.equal(h.run('activeBatchId'), 'B');
+  assert.equal(h.requests.some(item => item.url === '/api/batches/A'), false);
+  assert.equal(h.el('batch-title').textContent, 'Batch B');
+});
+
+test('late batch creation after switching workspace never selects the old batch', async () => {
+  const h = await harness();
+  h.run("addSource({name:'note.txt',kind:'txt',content:'example'})");
+  h.el('title').value = 'Example'; h.el('mode').value = 'rules';
+  const creating = h.el('generate-batch').onclick();
+  h.el('switch-workspace').onclick(); h.respond('/api/batches', { id: 'A' }); await creating;
+  assert.equal(h.run('activeBatchId'), null);
+  assert.equal(h.requests.some(item => item.url === '/api/batches/A'), false);
+  assert.equal(h.el('batch-panel').hidden, true);
+});
+
+test('batch polling and ZIP cannot use an obsolete or loading batch', async () => {
+  const h = await harness();
+  const a = h.run("selectBatch('A')"); h.respond('/api/batches/A', batch('A', false)); await a;
+  assert.equal(h.timers.length, 1); h.timers.shift()();
+  const old = h.take('/api/batches/A');
+  const b = h.run("selectBatch('B')");
+  assert.equal(h.el('export-batch').disabled, true);
+  await h.el('export-batch').onclick();
+  assert.equal(h.requests.some(item => item.url.includes('/export/zip')), false);
+  h.respond('/api/batches/B', batch('B')); await b;
+  old.resolve(h.response(batch('A'))); await settle();
+  assert.equal(h.el('batch-title').textContent, 'Batch B');
+  const downloading = h.el('export-batch').onclick();
+  h.respond('/api/batches/B/export/zip', 'zip B'); await downloading;
+  assert.equal(h.downloads[0].name, '批次-B.zip');
+});
+
+test('late comparison results cannot cross a workspace boundary', async () => {
+  const h = await harness(); h.el('compare-left').value = 'A'; h.el('compare-right').value = 'B';
+  const comparing = h.el('compare').onclick(); h.el('switch-workspace').onclick();
+  h.respond('/api/compare?left=A&right=B', { left:{title:'Old A'}, right:{title:'Old B'}, note:'old', sources:[], metrics:[] }); await comparing;
+  assert.equal(h.el('comparison').hidden, true);
+  assert.equal(h.el('comparison').children.length, 0);
 });

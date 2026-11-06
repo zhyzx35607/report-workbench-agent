@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import html
+import io
 import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID, uuid4
+from zipfile import ZipFile, ZIP_DEFLATED
 
 from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
@@ -15,6 +17,7 @@ from markdown_it import MarkdownIt
 from pydantic import ValidationError
 
 from . import agent, engine
+from .charts import render_charts, compare_reports
 from .store import Store
 
 STATIC = Path(__file__).parent / "static"
@@ -58,15 +61,16 @@ def normalize_workspace(value: str | None) -> str:
         raise HTTPException(400, "需要有效的工作区标识") from exc
 
 
-def export_html(markdown: str, title: str) -> str:
+def export_html(markdown: str, title: str, evidence: list[dict] | None = None) -> str:
     rendered = MarkdownIt("commonmark", {"html": False, "linkify": False}).enable("table").render(markdown)
     return f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
-<title>{html.escape(title)}</title><style>body{{font-family:system-ui,sans-serif;max-width:960px;margin:48px auto;padding:0 24px;color:#172a35;line-height:1.75}}table{{border-collapse:collapse;width:100%;font-size:.88rem;display:block;overflow:auto}}td,th{{padding:8px 12px;border:1px solid #ccd8dc;text-align:left}}th{{background:#eef5f5}}pre{{white-space:pre-wrap}}code{{overflow-wrap:anywhere}}blockquote{{border-left:3px solid #2e8b85;padding-left:18px;color:#475d67}}@media print{{body{{margin:0;max-width:none}}table{{font-size:9pt}}}}</style><article>{rendered}</article></html>"""
+<title>{html.escape(title)}</title><style>body{{font-family:system-ui,sans-serif;max-width:960px;margin:48px auto;padding:0 24px;color:#172a35;line-height:1.75}}table{{border-collapse:collapse;width:100%;font-size:.88rem;display:block;overflow:auto}}td,th{{padding:8px 12px;border:1px solid #ccd8dc;text-align:left}}th{{background:#eef5f5}}pre{{white-space:pre-wrap}}code{{overflow-wrap:anywhere}}blockquote{{border-left:3px solid #2e8b85;padding-left:18px;color:#475d67}}.data-chart{{margin:20px 0;border:1px solid #dce6e1;padding:16px;border-radius:10px;break-inside:avoid}}.data-chart svg{{width:100%;height:auto}}figcaption{{font-size:12px;color:#61756c}}@media print{{body{{margin:0;max-width:none}}table{{font-size:9pt}}}}</style><article>{render_charts(evidence or [])}{rendered}</article></html>"""
 
 
 def create_app(data_dir: Path | None = None) -> FastAPI:
     tasks: dict[str, asyncio.Task] = {}
+    queue_slot = asyncio.Semaphore(1)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -99,13 +103,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             model_text = None
             if request.mode == "model":
                 store.update(job_id, stage="等待模型分析统计与摘录", progress=65)
-                model_text = await engine.call_model(request.instruction, evidence)
+                model_text = await engine.call_model(engine.effective_instruction(request), evidence)
             elif request.mode == "agent":
-                model_text = await agent.run_agent(request.instruction, evidence, record_step)
+                model_text = await agent.run_agent(engine.effective_instruction(request), evidence, record_step)
             store.update(job_id, stage="整理证据与报告", progress=90)
             await asyncio.sleep(0)
             report = engine.compose_report(request, evidence, model_text, trace)
-            store.update(job_id, status="completed", stage="报告已保存", progress=100, markdown=report)
+            store.update(job_id, status="completed", stage="报告已保存", progress=100, markdown=report,
+                         evidence=json.dumps(evidence, ensure_ascii=False))
         except asyncio.CancelledError:
             if trace:
                 trace.append({"round": trace[-1]['round'], "kind": "cancel", "status": "cancelled", "summary": "任务已取消，停止后续模型与工具调用"})
@@ -120,6 +125,33 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         finally:
             tasks.pop(job_id, None)
 
+    async def queued_process(job_id, request):
+        try:
+            async with queue_slot:
+                await process(job_id, request)
+        except asyncio.CancelledError:
+            app.state.store.update(job_id, status='cancelled', stage='已取消', error='')
+            raise
+        finally:
+            tasks.pop(job_id, None)
+
+    def enqueue(job_id, request):
+        task = asyncio.create_task(queued_process(job_id, request))
+        tasks[job_id] = task
+        task.add_done_callback(lambda _: tasks.pop(job_id, None))
+
+    def check_capacity(workspace, count, mode):
+        if mode in {'model', 'agent'} and not engine.model_configured():
+            raise HTTPException(400, '模型模式尚未配置；请使用规则模式或配置模型环境变量')
+        if len(tasks) + count > 16 or app.state.store.pending(workspace) + count > 9:
+            raise HTTPException(429, '队列已满：每工作区最多 9 个未结束任务，全局最多 16 个')
+
+    def owned_batch(batch_id, workspace):
+        batch = app.state.store.batch(batch_id, workspace)
+        if batch is None:
+            raise HTTPException(404, '找不到该工作区的批次')
+        return batch
+
     def owned(job_id, workspace):
         job = app.state.store.get(job_id, workspace)
         if job is None:
@@ -129,7 +161,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.get("/api/config")
     def config():
         return {"model_available": engine.model_configured(), "max_source_bytes": engine.MAX_SOURCE_BYTES,
-                "max_total_bytes": engine.MAX_TOTAL_BYTES, "max_sources": 8, "agent_max_rounds": agent.MAX_ROUNDS}
+                "max_total_bytes": engine.MAX_TOTAL_BYTES, "max_sources": 8, "agent_max_rounds": agent.MAX_ROUNDS,
+                'templates': engine.TEMPLATES, 'queue_concurrency': 1, 'version': '0.2.0'}
 
     @app.post("/api/uploads")
     async def upload(file: UploadFile = File(...), x_workspace_id: str | None = Header(default=None)):
@@ -158,12 +191,71 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/api/jobs", status_code=202)
     async def create_job(request: engine.ReportRequest, x_workspace_id: str | None = Header(default=None)):
         workspace = normalize_workspace(x_workspace_id)
-        if request.mode in {"model", "agent"} and not engine.model_configured():
-            raise HTTPException(400, "模型模式尚未配置；请使用规则模式或配置模型环境变量")
+        check_capacity(workspace, 1, request.mode)
         job_id = str(uuid4())
-        app.state.store.create(job_id, workspace, request.title, request.mode, [engine.metadata(s) for s in request.sources])
-        tasks[job_id] = asyncio.create_task(process(job_id, request))
+        app.state.store.create(job_id, workspace, request.title, request.mode, [engine.metadata(s) for s in request.sources], request.template)
+        enqueue(job_id, request)
         return {"id": job_id}
+
+    @app.post('/api/batches', status_code=202)
+    async def create_batch(request: engine.BatchRequest, x_workspace_id: str | None = Header(default=None)):
+        workspace = normalize_workspace(x_workspace_id)
+        check_capacity(workspace, len(request.templates), request.mode)
+        batch_id = str(uuid4())
+        jobs = [(str(uuid4()), engine.ReportRequest(**{**request.model_dump(exclude={'templates'}),
+                 'template': template, 'title': request.title[:108] + ' · ' + engine.TEMPLATES[template]['name']}))
+                for template in request.templates]
+        app.state.store.create_batch(batch_id, workspace, request.title, jobs)
+        for job_id, value in jobs:
+            enqueue(job_id, value)
+        return {'id': batch_id, 'job_ids': [job_id for job_id, _ in jobs]}
+
+    @app.get('/api/batches')
+    def batches(x_workspace_id: str | None = Header(default=None)):
+        return app.state.store.batches(normalize_workspace(x_workspace_id))
+
+    @app.get('/api/batches/{batch_id}')
+    def batch(batch_id: str, x_workspace_id: str | None = Header(default=None)):
+        result = owned_batch(batch_id, normalize_workspace(x_workspace_id))
+        for job in result['jobs']:
+            for key in ('markdown', 'evidence'):
+                job.pop(key, None)
+        return result
+
+    @app.get('/api/batches/{batch_id}/export/zip')
+    def batch_zip(batch_id: str, x_workspace_id: str | None = Header(default=None)):
+        result = owned_batch(batch_id, normalize_workspace(x_workspace_id))
+        if not result['terminal']:
+            raise HTTPException(409, '请等待批次全部结束后导出，或取消未完成任务')
+        if not result['completed']:
+            raise HTTPException(409, '批次没有已完成报告可导出')
+        buffer = io.BytesIO()
+        manifest = {'batch_id': batch_id, 'title': result['title'], 'jobs': []}
+        with ZipFile(buffer, 'w', compression=ZIP_DEFLATED) as archive:
+            for job in result['jobs']:
+                # Entry names use server UUIDs only, never titles or uploaded filenames.
+                prefix = str(UUID(job['id']))
+                files = []
+                if job['status'] == 'completed':
+                    for suffix, content in [('md', job['markdown']), ('html', export_html(job['markdown'], job['title'], job['evidence']))]:
+                        filename = prefix + '.' + suffix
+                        archive.writestr(filename, content)
+                        files.append(filename)
+                manifest['jobs'].append({'id': job['id'], 'title': job['title'], 'template': job['template'], 'status': job['status'], 'files': files})
+            archive.writestr('manifest.json', json.dumps(manifest, ensure_ascii=False, indent=2))
+        return Response(buffer.getvalue(), media_type='application/zip', headers={'Content-Disposition': f'attachment; filename="batch-{batch_id[:8]}.zip"', 'X-Content-Type-Options': 'nosniff'})
+
+    @app.get('/api/compare')
+    def compare(left: str, right: str, x_workspace_id: str | None = Header(default=None)):
+        workspace = normalize_workspace(x_workspace_id)
+        if left == right:
+            raise HTTPException(422, '请选择两份不同报告')
+        a, b = owned(left, workspace), owned(right, workspace)
+        if a['status'] != 'completed' or b['status'] != 'completed':
+            raise HTTPException(409, '只能比较已完成报告')
+        if not a['evidence'] or not b['evidence']:
+            raise HTTPException(409, '旧版报告缺少指标快照，请重新生成后比较')
+        return compare_reports(a, b)
 
     @app.get("/api/jobs")
     def history(x_workspace_id: str | None = Header(default=None)):
@@ -172,6 +264,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str, x_workspace_id: str | None = Header(default=None)):
         return owned(job_id, normalize_workspace(x_workspace_id))
+
+    @app.get('/api/jobs/{job_id}/trace')
+    def trace_export(job_id: str, x_workspace_id: str | None = Header(default=None)):
+        job = owned(job_id, normalize_workspace(x_workspace_id))
+        return Response(json.dumps({'job_id': job['id'], 'status': job['status'], 'mode': job['mode'],
+                                    'template': job['template'], 'trace': job['trace']}, ensure_ascii=False, indent=2),
+                        media_type='application/json', headers={'Content-Disposition': f'attachment; filename="trace-{job_id[:8]}.json"', 'X-Content-Type-Options': 'nosniff'})
 
     @app.post("/api/jobs/{job_id}/cancel")
     async def cancel(job_id: str, x_workspace_id: str | None = Header(default=None)):
@@ -198,6 +297,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             while True:
                 job = owned(job_id, owner)
                 job.pop("markdown", None)
+                job.pop('evidence', None)
                 text = json.dumps(job, ensure_ascii=False)
                 if text != previous:
                     yield f"event: progress\ndata: {text}\n\n"
@@ -218,14 +318,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         headers = {"Content-Disposition": f'attachment; filename="report-{job_id[:8]}.{format}"', "X-Content-Type-Options": "nosniff"}
         if format == "md":
             return Response(job['markdown'], media_type="text/markdown; charset=utf-8", headers=headers)
-        return HTMLResponse(export_html(job['markdown'], job['title']), headers=headers)
+        return HTMLResponse(export_html(job['markdown'], job['title'], job['evidence']), headers=headers)
 
     @app.get("/api/jobs/{job_id}/preview")
     def preview(job_id: str, workspace: str = Query(...)):
         job = owned(job_id, normalize_workspace(workspace))
         if job['status'] != 'completed':
             raise HTTPException(409, "报告尚未完成")
-        return HTMLResponse(export_html(job['markdown'], job['title']))
+        return HTMLResponse(export_html(job['markdown'], job['title'], job['evidence']))
 
     @app.get("/")
     def index():

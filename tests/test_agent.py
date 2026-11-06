@@ -126,7 +126,10 @@ def test_malformed_argument_json_fails(client,owner,monkeypatch):
 
 
 def test_model_round_limit_is_enforced(client,owner,monkeypatch):
-    replies=[{'tool_calls':[call('inspect_source',{'source_id':1},f'call-{i}')]} for i in range(agent.MAX_ROUNDS)]
+    # Six distinct legal actions reach the round budget without triggering repeat detection.
+    actions=[('list_sources',{}),('inspect_source',{'source_id':1}),('inspect_source',{'source_id':2})]
+    actions += [('compare_metrics',{'source_ids':[1,2],'metric':metric,'column':'minutes'}) for metric in ('total','mean','maximum')]
+    replies=[{'tool_calls':[call(name,args,f'call-{i}')]} for i,(name,args) in enumerate(actions)]
     seen=gateway(monkeypatch,replies)
     job=finish(client,owner,run_job(client,owner))
     assert job['status']=='failed' and '6 轮上限' in job['error']

@@ -7,3 +7,4 @@ data/
 .env
 dist/
 build/
+artifacts/

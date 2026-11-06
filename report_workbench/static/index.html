@@ -12,6 +12,8 @@
   <button id="new-report" class="button secondary wide">＋ 新建报告</button>
   <div class="history-label">最近报告 <button id="refresh" title="刷新历史" aria-label="刷新历史">↻</button></div>
   <div id="history" class="history"></div>
+  <div class="history-label">多模板批次 <button id="refresh-batches" aria-label="刷新批次">↻</button></div>
+  <div id="batch-history" class="batch-history"></div>
   <div class="workspace"><span>当前浏览器工作区</span><code id="workspace-id"></code><button id="switch-workspace">创建新工作区</button><small>历史保存在本机。新工作区拥有独立的报告列表。</small></div>
 </aside>
 <main>
@@ -25,18 +27,22 @@
       <div class="paste-zone"><div class="paste-heading"><label for="paste">也可以直接粘贴</label><select id="paste-kind" aria-label="粘贴内容类型"><option value="md">Markdown</option><option value="txt">TXT</option><option value="csv">CSV</option></select></div><textarea id="paste" placeholder="粘贴一段笔记，或带表头的 CSV 数据…"></textarea><div class="paste-bottom"><input id="paste-name" maxlength="120" aria-label="资料名称" placeholder="资料名称（可选）"><button id="add-paste" class="button secondary">添加资料</button></div></div>
     </div>
     <div id="sources" class="sources"></div>
+    <div class="template-grid"><label>单份报告模板<select id="template"><option value="study">学习复盘</option><option value="comparison">数据对比</option><option value="overview">资料综述</option></select></label><p id="template-note">学习复盘：组织投入记录、原文依据和本人需要补充的复盘问题。</p></div>
     <label class="instruction">分析目标<textarea id="instruction" maxlength="2000" rows="2">概括学习投入与记录中的主要发现，并指出需要补充核验的信息。</textarea></label>
     <div class="run-row"><p id="mode-note">规则模式生成真实统计和原文摘录，不推断全文含义。</p><button id="generate" class="button primary">生成报告 <span>→</span></button></div>
+    <div class="batch-controls"><fieldset><legend>同一份资料，按多个模板依次生成</legend><label><input type="checkbox" name="batch-template" value="study" checked> 学习复盘</label><label><input type="checkbox" name="batch-template" value="comparison" checked> 数据对比</label><label><input type="checkbox" name="batch-template" value="overview" checked> 资料综述</label></fieldset><button id="generate-batch" class="button secondary">创建多模板批次</button><p>全局同时运行 1 个任务；每份报告可单独取消。批次全部结束后，可打包已完成报告。</p></div>
   </section>
+  <section id="batch-panel" class="card" hidden><div class="section-title"><h2>批次进度 <span id="batch-status"></span></h2><button id="export-batch" class="button secondary" disabled>下载完成报告 ZIP</button></div><h3 id="batch-title"></h3><div id="batch-jobs" class="batch-jobs"></div></section>
   <section class="card result">
     <div class="section-title"><h2><span>02</span> 报告与证据</h2><div class="exports"><button id="export-md" disabled>↓ Markdown</button><button id="export-html" disabled>↓ HTML</button><button id="print" disabled>打印预览</button></div></div>
     <div id="progress-panel" hidden><div class="progress-label"><span id="stage">等待生成</span><button id="cancel" class="danger">取消任务</button></div><progress id="progress" max="100" value="0"></progress></div>
-    <details id="agent-trace" hidden open><summary>Agent 执行步骤 <small>仅动作与结果摘要，不保存隐藏思维</small></summary><ol id="trace-list"></ol></details>
+    <details id="agent-trace" hidden open><summary>Agent 执行步骤 <small>仅动作与结果摘要，不保存隐藏思维</small></summary><button id="export-trace" class="button secondary">导出公开轨迹 JSON</button><ol id="trace-list"></ol></details>
     <div id="result-empty"><span>▧</span><h3>你的第一份报告，从一份资料开始</h3><p>完成后，你会看到输入来源、统计证据、生成方式与完整报告。</p></div>
     <div id="result-meta" hidden></div>
     <iframe id="preview" title="报告预览" sandbox="" hidden></iframe>
     <div id="failure" role="status" hidden></div>
   </section>
+  <section class="card"><div class="section-title"><h2><span>03</span> 已完成报告对比</h2><button id="compare" class="button secondary">比较指标</button></div><div class="compare-selects"><label>基线报告<select id="compare-left"><option value="">选择已完成报告</option></select></label><label>对照报告<select id="compare-right"><option value="">选择已完成报告</option></select></label></div><div id="comparison" hidden></div><p class="hint">比较持久化统计与来源哈希，差值为右侧减左侧；不会从模型文章抽取数值。</p></section>
   <footer>独立实现的个人报告工具 · 规则模式完全本地处理 · 模型模式只发送统计与有限摘录</footer>
 </main>
 </body>
