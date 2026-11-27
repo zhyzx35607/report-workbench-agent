@@ -22,7 +22,7 @@ v0.2 已实现三种报告模板、确定性 CSV 图表、多模板串行批次�
 
 Agent 不是把一次摘要请求换个名字：它有标准 `tool_calls` 协议、3 个工具白名单、严格参数校验、有限轮次、取消传播及持久化动作轨迹。没有实际检查过证据的最终回答会被拒绝。
 
-本项目独立实现，没有复制公司框架代码、业务数据、客户品牌、内部接口、私有 npm 包或历史凭据。
+本项目专注于轻量、可验证的个人报告工作流，使用本地 SQLite 持久化与纯原生前端交互，无需外部服务即可开箱体验。
 
 ## 本机启动
 
@@ -65,7 +65,7 @@ python -m uvicorn report_workbench.app:app --host 127.0.0.1 --port 8767
 
 页面底部可选择两份已完成报告，对比持久化的数值统计与来源哈希。按唯一文件名和类型配对，重复同名来源标为歧义；仅比较两侧都存在的数值列，差值为右侧减左侧。它不从模型文章抽取数据，也不把同名列当作单位和样本口径必然一致。
 
-`examples/` 还提供两份用于比较的学习记录和一份项目笔记。它们都是合成数据，不来自任何实际公司或个人记录。三分钟演示流程与简历表述见 [docs/resume.md](docs/resume.md)。
+`examples/` 还提供两份用于比较的合成学习记录和一份项目笔记，供开箱演示使用。三分钟演示流程与功能说明见 [docs/resume.md](docs/resume.md)。
 
 ## 可选模型配置
 
@@ -142,7 +142,7 @@ flowchart TD
     API --> C[取消：终止等待及后续工具调用]
 ```
 
-核心文件：`report_workbench/agent.py` 实现工具协议与有限循环；`engine.py` 负责模板、输入、统计和模型网关；`charts.py` 从持久化证据生成 SVG 与指标对比；`store.py` 负责参数化 SQLite 存取；`app.py` 负责串行任务队列、批次、隔离、SSE、上传与导出；`static/` 包含界面。不存在公司领域的债务、财务、人事或企业风险计算。
+核心文件：`report_workbench/agent.py` 实现工具协议与有限循环；`engine.py` 负责模板、输入、统计和模型网关；`charts.py` 从持久化证据生成 SVG 与指标对比；`store.py` 负责参数化 SQLite 存取；`app.py` 负责串行任务队列、批次、隔离、SSE、上传与导出；`static/` 包含界面。
 
 新增接口均使用 `X-Workspace-Id`：`POST/GET /api/batches`、`GET /api/batches/{id}`、`GET /api/batches/{id}/export/zip`、`GET /api/compare?left={id}&right={id}`、`GET /api/jobs/{id}/trace`。单份任务请求增加 `template`，批次请求使用不重复的 `templates` 列表。
 
