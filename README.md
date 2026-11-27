@@ -1,5 +1,7 @@
 # 纸页 · Report Workbench Agent
 
+> **English Summary**: A bounded tool-calling personal report workbench built with FastAPI, SQLite, and zero-build vanilla JS. Supports deterministic CSV statistics & SVG charts, three distinct report templates, serialized multi-template batches with SSE progress & cancellation, workspace-isolated history, persistent metric comparison, and traceable Markdown/HTML/ZIP exports.
+
 一个有界工具调用的个人报告 Agent：输入学习笔记、开源项目数据或个人记录，由模型选择检查资料、比较真实指标，再生成附带来源的结构化报告。后端采用 FastAPI 与 SQLite，前端是无需构建的原生浏览器界面。
 
 [![Tests](https://github.com/zhyzx35607/report-workbench-agent/actions/workflows/test.yml/badge.svg)](https://github.com/zhyzx35607/report-workbench-agent/actions/workflows/test.yml)
@@ -160,3 +162,10 @@ python scripts/evaluate_runtime.py
 另有 **13 项 JavaScript 测试通过**，覆盖历史/批次选择、工作区切换、SSE、取消、对比、批次提交与下载乱序响应。加载新报告或批次时禁用导出，避免预览和下载错配。
 
 固定离线运行时评测为 **16/16 通过**，结果写入被 Git 忽略的 `artifacts/runtime-eval.json`。这些用例检查成功工具链、非法参数、轮次预算、取消、供应商故障、无证据最终回答、无进展重复与队列失败隔离；它是可复现的运行时/协议评测，不是模型质量评测。浏览器已验证三模板批次、真实图表、指标对比及实际 ZIP 下载；详细范围见 [验证记录](docs/verification.md)。
+
+## 相关个人 Agent 项目（Portfolio）
+
+- [Warehouse Modeling Agent](https://github.com/zhyzx35607/warehouse-modeling-agent) — LangGraph 数仓分层建模、SQL 编译校验与本地 CSV 实验室
+- [Knowledge Navigator Agent](https://github.com/zhyzx35607/knowledge-navigator-agent) — 有界搜索/阅读工具、SQLite FTS5 + 混合召回与实时过期引用核验
+- [Report Workbench Agent](https://github.com/zhyzx35607/report-workbench-agent) — 确定性 CSV 统计/图表、多模板批次队列、SSE 进度与可追溯报告导出
+- [TraceForge](https://github.com/zhyzx35607/TraceForge) — 证据驱动的代码故障调查、SHA-256 审批绑定补丁与隔离回归验证工作台
